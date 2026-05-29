@@ -1,7 +1,6 @@
 import os
 import asyncio
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import threading
+from aiohttp import web
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -28,34 +27,20 @@ Enjoy your experience with us.
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(WELCOME_TEXT)
 
-# Define a simple /help command as mentioned in your message
+# Define a simple /help command
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("How can I help you? You can use the menu or contact support.")
 
-# Dummy HTTP Server to satisfy Render's port binding requirement
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"Bot is running!")
+# Asynchronous health check handler for Render
+async def handle_health_check(request):
+    return web.Response(text="Bot is running!")
 
-def run_health_check_server():
-    port = int(os.environ.get("PORT", 8000))
-    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    print(b"Health check server started on port", port)
-    server.serve_forever()
-
-def main():
-    # Get token from environment variables (set this up on Render)
+async def main():
+    # Get token from environment variables
     TOKEN = os.environ.get("TELEGRAM_TOKEN")
-    
     if not TOKEN:
         print("Error: No TELEGRAM_TOKEN found in environment variables.")
         return
-
-    # Start the dummy health check server in a background thread
-    threading.Thread(target=run_health_check_server, daemon=True).start()
 
     # Build the Telegram Bot application
     application = Application.builder().token(TOKEN).build()
@@ -64,9 +49,38 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
 
-    # Run the bot using polling
+    # Set up the web server for Render's health check
+    app = web.Application()
+    app.router.add_get('/', handle_health_check)
+    
+    port = int(os.environ.get("PORT", 8000))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    
+    # Start the web server
+    await site.start()
+    print(f"Health check server started on port {port}")
+
+    # Initialize and start the telegram bot polling inside the same async event loop
+    await application.initialize()
+    await application.start()
     print("Bot is polling...")
-    application.run_polling()
+    await application.updater.start_polling()
+
+    # Keep running until interrupted
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    finally:
+        # Clean up nicely on shutdown
+        await application.updater.stop()
+        await application.stop()
+        await application.shutdown()
+        await runner.cleanup()
 
 if __name__ == "__main__":
-    main()
+    # Explicitly run using the modern asyncio entry point
+    asyncio.run(main())
